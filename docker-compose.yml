@@ -1,7 +1,7 @@
 services:
   skill-os:
     build: .
-    image: skill-os:1.2
+    image: skill-os:1.3
     container_name: skill-os
 
     volumes:
@@ -25,6 +25,10 @@ services:
 
       # NON serve ANTHROPIC_API_KEY: il ragionamento LLM passa
       # attraverso MCP sampling → abbonamento Claude Pro
+
+      # Auto-approvazione skill sicure (no side_effects, idempotent)
+      AUTO_APPROVE_SAFE: ${AUTO_APPROVE_SAFE:-false}
+      AUTO_APPROVE_MIN_SCORE: ${AUTO_APPROVE_MIN_SCORE:-7.0}
 
       # Timeout attesa approvazione upsert (secondi)
       APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}

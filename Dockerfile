@@ -2,7 +2,7 @@
 FROM python:3.11.12-slim AS base
 
 LABEL maintainer="skill-os" \
-      version="1.2" \
+      version="1.3" \
       description="skill-os — MCP Skill Registry auto-evolutivo"
 
 # Git necessario per il versioning automatico delle skill
