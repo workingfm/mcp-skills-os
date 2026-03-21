@@ -424,7 +424,7 @@ Il prompt include sempre:
 
 ```bash
 ASR_ENABLED=true                  # Attiva/disattiva evoluzione adattiva
-ASR_MAX_RETRIES=2                 # Max retry per episodio
+ASR_MAX_RETRIES=1                 # Max retry per episodio (1 mutazione + 1 retry)
 ASR_MAX_MUTATIONS_PER_DAY=5       # Max mutazioni giornaliere per skill
 ASR_STABILITY_THRESHOLD=10        # Successi consecutivi per status "stable"
 ASR_DEGRADED_AFTER_ROLLBACKS=3    # Rollback consecutivi per status "degraded"
