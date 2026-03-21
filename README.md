@@ -1,8 +1,8 @@
 # skill-os
 
-## MCP Skill Registry Auto-Evolutivo
+## MCP Skill Registry con ASR (Adaptive Skill Reinforcement)
 
-Un server MCP (Model Context Protocol) che fornisce un registro di skill auto-evolutivo. Un agente AI connesso via MCP può scoprire, usare, creare e migliorare le proprie skill autonomamente. Il ragionamento LLM passa attraverso MCP sampling, utilizzando l'abbonamento Claude Pro dell'utente. Zero API key necessarie.
+Un server MCP (Model Context Protocol) con un sistema di **Reinforcement Learning applicato all'evoluzione di tool AI**. Le skill si evolvono automaticamente quando falliscono, convergendo verso la perfezione attraverso l'uso reale. Zero API key necessarie — il ragionamento LLM passa attraverso MCP sampling con l'abbonamento Claude Pro.
 
 ---
 
@@ -32,6 +32,7 @@ Agente AI (Claude Code / qualsiasi client MCP)
 |  Skill Registry (hot-reload)      |
 |  Executor (sandbox Docker)        |
 |  Safety engine + auto-approve     |
+|  ASR Engine (Adaptive RL)         |
 |  Orchestrator (background loop)   |
 +----------------+------------------+
                  |  docker run (sandbox)
@@ -66,6 +67,7 @@ skill-os --> Agente: "skill pronta, approva o rifiuta"
 | `create_skill(skill_id, description)` | Genera una nuova skill completa via LLM |
 | `approve_pending(approval_id, approve)` | Approva o rifiuta una proposta |
 | `list_pending_approvals()` | Elenca le proposte in attesa |
+| `skill_fitness(skill_id)` | Stato RL della skill: fitness, generazione, curva di apprendimento |
 
 ---
 
@@ -134,6 +136,60 @@ Il ciclo autonomo:
 3. Le proposte sicure (no side_effects, idempotent) vengono auto-approvate
 4. Le proposte con side_effects restano in `pending_approvals/` per review umana
 5. Ogni modifica viene committata in Git con versioning automatico
+
+### 5. ASR — Adaptive Skill Reinforcement (v2.0)
+
+Le skill si evolvono automaticamente quando falliscono. Nessun ciclo programmato — l'evoluzione e' **on-demand**, innescata dall'uso reale:
+
+```python
+# Esegui una skill — se fallisce, si evolve automaticamente
+execute("python_exec:run_code", code="import openpyxl; print('ok')")
+
+# Output:
+# ⚡ Skill 'python_exec' in evoluzione — analisi del fallimento...
+#    Diagnosi: ENVIRONMENT / missing_dependency (confidence: 0.95)
+#    Mutazione: manifest.json → aggiunta dipendenza 'openpyxl'
+#    Retry in corso...
+# --> {"status": "ok", "stdout": "ok\n", "asr_info": {"evolved": true}}
+
+# La prossima volta funziona al primo colpo!
+
+# Consulta lo stato RL di una skill
+skill_fitness("python_exec")
+# --> fitness: 8.7/10, generation: 4, status: "stable"
+# --> fitness_curve: [5.0, 6.1, 7.2, 8.7]  (curva di apprendimento)
+```
+
+**Come funziona il ciclo RL:**
+
+```
+Richiesta --> Skill invocata --> Successo? --> Risultato (skill resta ferma)
+                                    |  No
+                              Diagnosi automatica
+                                    |
+                              Snapshot pre-mutazione
+                                    |
+                              Mutazione (deterministica o LLM)
+                                    |
+                              Retry --> Successo? --> Skill evoluta per sempre
+                                           |  No
+                                        Rollback a snapshot precedente
+```
+
+| Concetto RL | skill-os ASR |
+|---|---|
+| Reward | +1.0 successo, -0.5 errore, -1.0 crash |
+| Fitness | EMA dei reward, scala 0-10 |
+| Mutazione | Deterministica (dependency, timeout) o LLM-guided (codice, prompt) |
+| Convergenza | 10 successi consecutivi → skill "stabile" |
+| Safety | Snapshot + rollback, solo skill sandboxed, 3 rollback → "degraded" |
+
+```bash
+# Configurazione ASR (.env)
+ASR_ENABLED=true                  # attiva evoluzione adattiva
+ASR_MAX_MUTATIONS_PER_DAY=5       # max mutazioni giornaliere per skill
+ASR_COOLDOWN_SECONDS=300          # cooldown tra mutazioni (5 min)
+```
 
 ---
 
@@ -210,6 +266,13 @@ AUTO_APPROVE_MIN_SCORE=7.0     # score minimo per auto-approve evoluzione
 
 # Altro
 APPROVAL_TIMEOUT_SECONDS=300   # timeout per approvazioni manuali via upsert tool
+
+# ASR — Adaptive Skill Reinforcement
+ASR_ENABLED=true                  # attiva/disattiva evoluzione adattiva
+ASR_MAX_MUTATIONS_PER_DAY=5       # max mutazioni giornaliere per skill
+ASR_STABILITY_THRESHOLD=10        # successi consecutivi per status "stable"
+ASR_DEGRADED_AFTER_ROLLBACKS=3    # rollback consecutivi per status "degraded"
+ASR_COOLDOWN_SECONDS=300          # cooldown tra mutazioni sulla stessa skill
 ```
 
 ### Modalita' operative
@@ -219,6 +282,7 @@ APPROVAL_TIMEOUT_SECONDS=300   # timeout per approvazioni manuali via upsert too
 | **Manuale** | default | L'agente chiede, tu approvi tutto |
 | **Semi-autonomo** | `AUTO_APPROVE_SAFE=true` | Skill sicure auto-approvate, le altre richiedono review |
 | **Autonomo** | `ORCHESTRATOR_ENABLED=true` + `AUTO_APPROVE_SAFE=true` | Auto-evoluzione completa in background |
+| **ASR** | `ASR_ENABLED=true` | Le skill si evolvono on-demand quando falliscono (RL adattivo) |
 
 ---
 
