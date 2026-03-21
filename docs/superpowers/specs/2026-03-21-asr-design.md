@@ -17,6 +17,8 @@ Nessuna evoluzione casuale. Nessun ciclo programmato. L'evoluzione avviene **on-
 - **Evoluzione totale**: prompt, codice e manifest possono tutti essere mutati.
 - **Snapshot & rollback**: ogni mutazione e' preceduta da snapshot. Se peggiora, rollback istantaneo.
 - **Convergenza**: dopo N successi consecutivi, la skill diventa "stabile" e non viene piu' toccata.
+- **Safety-aware**: le mutazioni rispettano i safety flag del manifest. Skill con sandbox=none/host non vengono mai auto-mutate.
+- **Concurrency-safe**: scritture atomiche al fitness store (write-to-temp + rename) con asyncio lock per skill.
 
 ## Mappatura RL
 
@@ -24,7 +26,7 @@ Nessuna evoluzione casuale. Nessun ciclo programmato. L'evoluzione avviene **on-
 |---|---|
 | Stato | Versione corrente della skill (prompt + codice + manifest) |
 | Azione | Mutazione (cosa cambiare nella skill) |
-| Reward | Esito dell'esecuzione (+1.0 successo, +0.5 parziale, -0.5 errore gestibile, -1.0 crash, -0.8 timeout) |
+| Reward | Esito dell'esecuzione (+1.0 successo, -0.5 errore, -1.0 crash/timeout) |
 | Policy | Strategia di mutazione guidata dall'analisi del fallimento |
 | Episodio | Singola invocazione -> feedback -> eventuale evoluzione |
 | Convergenza | Skill che non fallisce piu' -> reward stabile -> nessuna mutazione |
@@ -89,11 +91,9 @@ execute("skill:tool", code="...")
          |
          v
     FASE 2: REWARD SIGNAL
-    exit_code == 0, output valido    -> reward +1.0
-    exit_code == 0, output parziale  -> reward +0.5
-    exit_code != 0, errore gestibile -> reward -0.5
-    exit_code != 0, crash totale     -> reward -1.0
-    timeout                          -> reward -0.8
+    exit_code == 0                   -> reward +1.0
+    exit_code != 0                   -> reward -0.5
+    timeout / crash                  -> reward -1.0
          |
     reward >= 0 ?
     /          \
@@ -121,7 +121,7 @@ risultato     1. Feedback visibile all'utente
 
 | Regola | Valore |
 |---|---|
-| Max retry per episodio | 2 |
+| Max retry per episodio | 1 (singolo tentativo di mutazione + retry) |
 | Max mutazioni/giorno per skill | 5 |
 | Soglia evoluzione | reward < 0 |
 | Soglia stabilita' | 10 successi consecutivi -> status "stable" |
@@ -179,12 +179,15 @@ File: `data/fitness_store.json`
 }
 ```
 
-### Calcolo fitness (EMA)
+### Calcolo fitness (EMA, scala 0-10)
 
 ```
-fitness_new = alpha * reward + (1 - alpha) * fitness_old
+ema_new = alpha * reward + (1 - alpha) * ema_old       # range [-1, +1]
+fitness = (ema_new + 1.0) * 5.0                         # mappato a [0, 10]
 alpha = 0.3
 ```
+
+Una skill nuova parte con fitness 5.0 (EMA = 0). Successi consecutivi la spingono verso 10.0, fallimenti verso 0.
 
 ### Limiti retention
 
@@ -274,6 +277,10 @@ data/
             +-- ...
 ```
 
+### Relazione con git_helper.py
+
+Lo Snapshot Manager e' il meccanismo di rollback primario (veloce, in-memory path). Dopo ogni mutazione confermata, il sistema chiama anche `git_helper.commit_skill_update()` per persistere la modifica in git. In caso di rollback, lo snapshot viene ripristinato su disco e il rollback viene a sua volta committato in git. Git e' il registro di audit, lo snapshot e' il fast-path operativo.
+
 ### Regole rollback
 
 | Situazione | Azione |
@@ -312,13 +319,31 @@ def skill_fitness(skill_id: str = "") -> dict:
     """Ritorna lo stato RL di una o tutte le skill."""
 ```
 
+Esempio di ritorno per una singola skill:
+
+```json
+{
+  "skill_id": "python_exec",
+  "fitness": 8.7,
+  "generation": 4,
+  "status": "stable",
+  "consecutive_successes": 12,
+  "total_episodes": 47,
+  "total_mutations": 3,
+  "total_rollbacks": 1,
+  "fitness_curve": [5.0, 6.1, 7.2, 8.7],
+  "last_mutation": "Added openpyxl to dependencies",
+  "message": "Skill stabile - nessuna evoluzione necessaria"
+}
+```
+
 ## File coinvolti
 
 ### Nuovi
 
 | File | Scopo |
 |---|---|
-| server/evolution.py | ASR Engine (~400 righe) |
+| server/evolution.py | ASR Engine (~600-800 righe) |
 | data/fitness_store.json | Memoria RL (creato a runtime) |
 | data/snapshots/ | Snapshot generazioni (creato a runtime) |
 
@@ -335,6 +360,66 @@ def skill_fitness(skill_id: str = "") -> dict:
 
 server/registry.py, server/executor.py, server/safety.py, server/git_helper.py, skills/*
 
+## Concurrency e Atomicita'
+
+### Fitness store
+
+- Un `asyncio.Lock` per skill_id protegge letture/scritture concorrenti al fitness store.
+- Le scritture sono atomiche: write a file temporaneo + `os.rename()` (atomico su filesystem POSIX).
+- Il background orchestrator e le chiamate `execute()` concorrenti non possono corrompere il file.
+
+### Mutazioni su disco
+
+- Prima di scrivere file mutati in `skills/<skill_id>/`, l'engine chiama `registry.reload()` esplicitamente dopo la scrittura (non si affida al watchdog debounce di 0.3s).
+- Questo garantisce che il retry immediatamente successivo esegua il codice mutato.
+
+## Sicurezza delle Mutazioni
+
+### Sandbox gate
+
+Le mutazioni ASR sono permesse **solo** per skill con `sandbox=docker` nel manifest. Le skill con `sandbox=none` o `sandbox=host` (come `skill_manager` e `orchestrator`) **non vengono mai auto-mutate** perche' eseguono codice con accesso diretto al filesystem e alla rete.
+
+Se una skill non-sandboxed fallisce:
+- Il fallimento viene registrato nel fitness store (reward, diagnosi)
+- Nessuna mutazione automatica
+- Il risultato include un campo `asr_info.sandbox_blocked = true` che segnala che serve intervento manuale
+
+### Integrazione con il sistema di approvazione
+
+Le mutazioni ASR passano attraverso la safety validation esistente:
+1. Prima della mutazione, l'engine verifica `_is_safe_for_auto_approve()` sul manifest della skill
+2. Se la skill ha `side_effects=true` o `requires_human_approval=true`, la mutazione viene scritta come `pending_approval` anziche' applicata direttamente
+3. Solo le skill sicure (no side_effects, idempotent) vengono mutate e applicate in-line con retry immediato
+4. Ogni mutazione confermata viene anche git-committata via `git_helper.commit_skill_update()` per auditabilita'
+
+### Input deduplication
+
+Se lo stesso input (per hash) causa fallimenti ripetuti, la seconda occorrenza e successive **non** triggerano nuove mutazioni — evita di sprecare il budget giornaliero sullo stesso errore noto. Il fallimento viene comunque registrato nel fitness store.
+
+## Interazione con Orchestrator esistente
+
+L'orchestrator background (ciclo ogni 30 min) e l'ASR sono due pressioni evolutive complementari:
+
+| Aspetto | Orchestrator | ASR |
+|---|---|---|
+| Trigger | Timer (ogni 30 min) | Fallimento runtime on-demand |
+| Scope | Tutte le skill | Solo la skill che ha fallito |
+| Mutazione | Proposta LLM via eval | Fix mirata al fallimento specifico |
+| Approval | Via pending_approvals/ | Inline per skill sicure, pending per le altre |
+
+Se entrambi tentano di mutare la stessa skill contemporaneamente, il lock per skill_id serializza le operazioni. La seconda mutazione vedra' la generation aggiornata dalla prima.
+
+## Prompt di mutazione LLM — Contenuto completo
+
+Il prompt include sempre:
+- Skill ID, generazione corrente, fitness attuale
+- Diagnosi (categoria, subcategoria, confidence)
+- Errore originale (stderr completo)
+- Input che ha causato il fallimento (troncato a 2000 chars)
+- **system_prompt.md corrente** (contesto sulla finalita' della skill)
+- File target da mutare (contenuto completo)
+- Storia delle mutazioni precedenti (per evitare fix gia' fallite)
+
 ## Variabili d'ambiente
 
 ```bash
@@ -346,4 +431,7 @@ ASR_DEGRADED_AFTER_ROLLBACKS=3    # Rollback consecutivi per status "degraded"
 ASR_FITNESS_ALPHA=0.3             # Peso nuovo episodio nel calcolo fitness
 ASR_MAX_EPISODES=200              # Max episodi nel fitness store
 ASR_MAX_SNAPSHOTS=20              # Max snapshot per skill
+ASR_COOLDOWN_SECONDS=300          # Cooldown tra mutazioni sulla stessa skill (5 min)
 ```
+
+Nota: ASR_ENABLED viene letto all'avvio del server. Modifiche al `.env` richiedono restart.
