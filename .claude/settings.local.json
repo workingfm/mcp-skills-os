@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(grep -E '\\(sk-[a-zA-Z0-9]{20,}|sk_live_[a-zA-Z0-9]+|sk_test_[a-zA-Z0-9]+|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|glpat-[a-zA-Z0-9_-]+|AKIA[A-Z0-9]{16}|xox[baprs]-[a-zA-Z0-9-]+|-----BEGIN.*PRIVATE KEY|eyJ[a-zA-Z0-9_-]+\\\\.eyJ[a-zA-Z0-9_-]+\\\\.\\)' /Users/elettrofranky/python-projects/skill-os-docker/.planning/codebase/*.md)",
+      "Bash(node:*)",
+      "Bash(pip show:*)",
+      "Bash(python3 -c \"import fastmcp; print\\(dir\\(fastmcp.FastMCP\\)\\)\")",
+      "Bash(pip3 install:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:gofastmcp.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:anish-natekar.github.io)",
+      "Bash(python3 -m py_compile server/main.py)",
+      "Bash(python3 -m py_compile server/safety.py)",
+      "Bash(python3 -m py_compile server/registry.py)",
+      "Bash(python3 -m py_compile server/executor.py)",
+      "Bash(python3 -m py_compile skills/skill_manager/tools/upsert.py)",
+      "Bash(python3 -m py_compile skills/orchestrator/tools/run_cycle.py)",
+      "mcp__MCP_DOCKER__fetch",
+      "Bash(python3 -m py_compile skills/skill_manager/tools/eval.py)",
+      "Bash(bash -n /Users/elettrofranky/python-projects/skill-os-docker/entrypoint.sh)",
+      "Bash(npx:*)",
+      "Bash(for dir:*)",
+      "Bash(do rm:*)",
+      "Bash(rm -f \"$HOME/$dir/cache/gsd-update-check.json\")",
+      "Bash(done)",
+      "Bash(docker:*)",
+      "Bash(brew list:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git rebase:*)",
+      "Bash(GIT_EDITOR=true git rebase --continue)"
+    ]
+  }
+}
