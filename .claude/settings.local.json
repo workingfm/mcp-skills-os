@@ -29,10 +29,27 @@
       "Bash(done)",
       "Bash(docker:*)",
       "Bash(brew list:*)",
-      "Bash(git checkout:*)",
-      "Bash(git add:*)",
+      "Bash(pip3 show:*)",
+      "Bash(python3 -c \"import fastmcp; print\\(fastmcp.__version__\\); print\\(fastmcp.__file__\\)\")",
+      "Bash(python3 -c \"import fastmcp; print\\(fastmcp.__file__\\)\")",
+      "Bash(ls /usr/lib/python3*)",
+      "Bash(ls /usr/bin/python*)",
+      "Bash(ls /opt/homebrew/bin/python*)",
+      "Bash(/opt/homebrew/bin/python3.12 -c \"import fastmcp; print\\(fastmcp.__version__, fastmcp.__file__\\)\")",
+      "Bash(find ~/.cache/uv -name *.py -path */fastmcp*)",
+      "Bash(find ~/.cache/uv -name *.dist-info -type d)",
+      "Bash(xargs -I{} basename {})",
+      "Bash(do if:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "mcp__skill-os__list_skills",
+      "Bash(gh repo:*)",
+      "Bash(git ls-remote:*)",
+      "Bash(git remote:*)",
+      "Bash(git branch:*)",
+      "Bash(git fetch:*)",
       "Bash(git rebase:*)",
-      "Bash(GIT_EDITOR=true git rebase --continue)"
+      "Bash(git stash:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

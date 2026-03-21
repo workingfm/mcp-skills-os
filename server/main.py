@@ -12,6 +12,7 @@ Tool MCP esposti:
   approve_pending(approval_id, approve) → approvazione umana upsert
 """
 import asyncio
+from contextlib import asynccontextmanager
 import datetime
 import json
 import logging
@@ -54,14 +55,30 @@ executor = Executor()
 # ------------------------------------------------------------------ #
 #  MCP Server                                                          #
 # ------------------------------------------------------------------ #
+@asynccontextmanager
+async def _lifespan(server):
+    """Avvia il background orchestrator loop al boot del server MCP."""
+    task = asyncio.create_task(_orchestrator_loop())
+    logger.info("[startup] orchestrator loop schedulato")
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
 mcp = FastMCP(
     "skill-os",
+    lifespan=_lifespan,
     instructions=(
         "Sei connesso a skill-os v1.2 — MCP Skill Registry auto-evolutivo.\n\n"
         "Workflow standard (3 chiamate):\n"
         "  1. list_skills()                    → scopri le skill disponibili\n"
         "  2. get_prompt('skill_id')           → carica il system prompt (lazy)\n"
         "  3. execute('skill_id:tool_id', ...) → esegui il tool in sandbox\n\n"
+        "Creare nuove skill:\n"
+        "  create_skill('skill_id', 'descrizione') → genera skill completa via LLM\n"
+        "  Se execute() non trova una skill, tenta di generarla automaticamente.\n"
+        "  Ogni nuova skill richiede approvazione: approve_pending(id, True)\n\n"
         "Per il ciclo di auto-evoluzione:\n"
         "  execute('skill_manager:eval_skill', code='{\"skill_id\":\"X\"}')\n"
         "  execute('orchestrator:run_cycle')    → analizza e propone miglioramenti\n"
@@ -112,8 +129,15 @@ async def execute(tool_ref: str, code: str = "", input_data: str = "",
 
     try:
         tool = registry.get_tool(skill_id, tool_id)
-    except KeyError as e:
-        return {"status": "error", "stdout": "", "exit_code": 1, "stderr": str(e)}
+    except KeyError:
+        # ── Skill non trovata: prova a crearla via LLM ────────────
+        if ctx is not None:
+            gen_result = await _auto_generate_skill(skill_id, tool_id, code, ctx)
+            if gen_result.get("status") == "created":
+                return gen_result
+        return {"status": "error", "stdout": "", "exit_code": 1,
+                "stderr": f"Skill '{skill_id}' o tool '{tool_id}' non trovata. "
+                           f"Usa create_skill('{skill_id}', '<descrizione>') per crearla."}
 
     try:
         needs_approval = check_execution(tool)
@@ -257,6 +281,140 @@ def _write_proposal_pending(skill_id: str, eval_result: dict, proposal: dict) ->
 
 
 @mcp.tool()
+async def create_skill(skill_id: str, description: str, ctx: Context = None) -> dict:
+    """
+    Genera una nuova skill completa via LLM (MCP sampling).
+    Crea manifest.json, system_prompt.md e tools/run.py, poi la registra.
+    Richiede approvazione umana prima di scrivere su disco.
+
+    Args:
+        skill_id:    Identificativo unico della skill (es. 'csv_analyzer')
+        description: Descrizione di cosa deve fare la skill
+    """
+    if not skill_id or not description:
+        return {"status": "error", "error": "skill_id e description sono obbligatori"}
+
+    # Controlla se esiste già
+    existing = registry.list_skills()
+    if skill_id in existing:
+        return {"status": "error", "error": f"La skill '{skill_id}' esiste già (v{existing[skill_id]['version']})"}
+
+    if ctx is None:
+        return {"status": "error", "error": "Context MCP non disponibile per sampling LLM"}
+
+    return await _generate_skill_via_llm(skill_id, description, ctx)
+
+
+async def _auto_generate_skill(skill_id: str, tool_id: str, code: str, ctx: Context) -> dict:
+    """Tenta di generare automaticamente una skill quando non viene trovata."""
+    logger.info(f"[auto-create] skill '{skill_id}' non trovata, tentativo di generazione automatica")
+    description = (
+        f"Skill '{skill_id}' con tool '{tool_id}'. "
+        f"L'utente ha tentato di eseguire: {code[:500]}" if code else
+        f"Skill '{skill_id}' con tool '{tool_id}'."
+    )
+    return await _generate_skill_via_llm(skill_id, description, ctx)
+
+
+async def _generate_skill_via_llm(skill_id: str, description: str, ctx: Context) -> dict:
+    """Genera una skill completa usando MCP sampling e la propone per approvazione."""
+
+    # ── Esempio di skill esistente come riferimento ────────────────
+    example_manifest = json.dumps({
+        "id": "example_skill",
+        "version": "1.0.0",
+        "description": "Descrizione della skill",
+        "system_prompt_uri": "skill://example_skill/system_prompt.md",
+        "tools": [{
+            "id": "run",
+            "description": "Cosa fa il tool",
+            "entrypoint": "tools/run.py:main",
+            "execution": {"tier": "server", "sandbox": "docker", "timeout_seconds": 30},
+            "safety": {"side_effects": False, "requires_human_approval": False, "idempotent": True},
+            "runtime": {"language": "python", "version": "3.11", "dependencies": []}
+        }]
+    }, indent=2)
+
+    generation_prompt = (
+        f"Sei un esperto architetto di skill per il sistema skill-os MCP.\n\n"
+        f"Devi generare una NUOVA skill con id='{skill_id}'.\n"
+        f"Descrizione richiesta: {description}\n\n"
+        f"Esempio di manifest.json:\n{example_manifest}\n\n"
+        f"Il tool runner (tools/run.py) deve:\n"
+        f"- Avere una funzione main() come entrypoint\n"
+        f"- Leggere input da SKILL_SANDBOX_DIR/user_code.py (codice/payload utente)\n"
+        f"- Leggere dati aggiuntivi da SKILL_SANDBOX_DIR/input.txt\n"
+        f"- Stampare output su stdout (JSON preferito)\n"
+        f"- Stampare errori su stderr\n"
+        f"- Usare sys.exit(1) in caso di errore\n\n"
+        f"Rispondi SOLO con JSON valido con questa struttura:\n"
+        f'{{\n'
+        f'  "manifest": {{...manifest.json completo...}},\n'
+        f'  "system_prompt": "...contenuto di system_prompt.md...",\n'
+        f'  "tool_code": "...codice Python di tools/run.py..."\n'
+        f'}}'
+    )
+
+    try:
+        response = await ctx.sample(generation_prompt)
+        text = response.text if hasattr(response, "text") else str(response)
+        text = text.strip().replace("```json", "").replace("```", "").strip()
+        generated = json.loads(text)
+    except Exception as e:
+        logger.error(f"[create-skill] generazione LLM fallita: {e}")
+        return {"status": "error", "error": f"Generazione LLM fallita: {e}"}
+
+    manifest = generated.get("manifest", {})
+    system_prompt = generated.get("system_prompt", "")
+    tool_code = generated.get("tool_code", "")
+
+    if not manifest or not system_prompt or not tool_code:
+        return {"status": "error", "error": "LLM ha generato dati incompleti"}
+
+    # Forza l'id corretto nel manifest
+    manifest["id"] = skill_id
+    manifest["system_prompt_uri"] = f"skill://{skill_id}/system_prompt.md"
+
+    # ── Crea proposta di approvazione ──────────────────────────────
+    approval_id = secrets.token_hex(6)
+    payload = {
+        "approval_id": approval_id,
+        "skill_id": skill_id,
+        "version_new": manifest.get("version", "1.0.0"),
+        "rationale": f"Nuova skill generata via LLM: {description[:200]}",
+        "git_commit_message": f"feat: add skill '{skill_id}' v{manifest.get('version', '1.0.0')}",
+        "changes_summary": ["manifest.json", "system_prompt.md", "tools/run.py"],
+        "source": "create_skill_mcp_sampling",
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        "changes": [
+            {"file": "manifest.json", "after": json.dumps(manifest, indent=2, ensure_ascii=False)},
+            {"file": "system_prompt.md", "after": system_prompt},
+            {"file": "tools/run.py", "after": tool_code},
+        ],
+    }
+    PENDING_DIR.mkdir(exist_ok=True)
+    (PENDING_DIR / f"{approval_id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+    logger.info(f"[create-skill] proposta per '{skill_id}' creata, approval_id={approval_id}")
+
+    return {
+        "status": "created",
+        "approval_id": approval_id,
+        "skill_id": skill_id,
+        "description": manifest.get("description", description),
+        "tools": [t["id"] for t in manifest.get("tools", [])],
+        "message": (
+            f"Skill '{skill_id}' generata con successo!\n"
+            f"Per approvarla: approve_pending('{approval_id}', approve=True)\n"
+            f"Per rifiutarla: approve_pending('{approval_id}', approve=False)\n"
+            f"Dopo l'approvazione la skill sarà disponibile immediatamente (hot-reload)."
+        ),
+    }
+
+
+@mcp.tool()
 def approve_pending(approval_id: str, approve: bool = True) -> dict:
     """
     Approva o rifiuta un upsert in attesa di conferma umana.
@@ -274,7 +432,48 @@ def approve_pending(approval_id: str, approve: bool = True) -> dict:
     decision_file.write_text(decision)
 
     logger.info(f"[approval] {approval_id} → {decision}")
-    return {"ok": True, "approval_id": approval_id, "decision": decision}
+
+    result = {"ok": True, "approval_id": approval_id, "decision": decision}
+
+    # ── Se approvato, applica le changes su disco ──────────────────
+    if approve:
+        try:
+            data = json.loads(pending_file.read_text())
+            skill_id = data.get("skill_id", "")
+            changes = data.get("changes", [])
+
+            if skill_id and changes:
+                skill_dir = SKILLS_DIR / skill_id
+                for change in changes:
+                    rel_path = change.get("file", "")
+                    content = change.get("after", "")
+                    if rel_path and content:
+                        target = skill_dir / rel_path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(content, encoding="utf-8")
+
+                # Aggiorna versione nel manifest
+                manifest_path = skill_dir / "manifest.json"
+                if manifest_path.exists() and data.get("version_new"):
+                    try:
+                        manifest = json.loads(manifest_path.read_text())
+                        manifest["version"] = data["version_new"]
+                        manifest_path.write_text(
+                            json.dumps(manifest, indent=2, ensure_ascii=False))
+                    except Exception:
+                        pass
+
+                # Ricarica il registry per rendere la skill disponibile
+                registry.reload()
+
+                result["skill_id"] = skill_id
+                result["files_written"] = [c.get("file") for c in changes]
+                logger.info(f"[approval] changes applicate per '{skill_id}'")
+        except Exception as e:
+            logger.error(f"[approval] errore applicando changes: {e}")
+            result["warning"] = f"Approvato ma errore applicando changes: {e}"
+
+    return result
 
 
 @mcp.tool()
@@ -362,13 +561,6 @@ async def _orchestrator_loop():
 # ------------------------------------------------------------------ #
 #  Run                                                                 #
 # ------------------------------------------------------------------ #
-@mcp.on_startup()
-async def on_startup():
-    """Avvia il background orchestrator loop al boot del server MCP."""
-    asyncio.create_task(_orchestrator_loop())
-    logger.info("[startup] orchestrator loop schedulato")
-
-
 if __name__ == "__main__":
     logger.info("skill-os v1.2 — avvio (stdio, Claude Code transport)")
     logger.info(f"skills_dir = {SKILLS_DIR}")
