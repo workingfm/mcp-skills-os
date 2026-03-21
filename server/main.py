@@ -1,5 +1,5 @@
 """
-skill-os v1.3 — MCP Skill Registry AUTO-EVOLUTIVO
+skill-os v2.0 — MCP Skill Registry con ASR (Adaptive Skill Reinforcement)
 Entry point: FastMCP server (stdio → Claude Code)
 
 Il ragionamento LLM passa interamente attraverso MCP sampling,
@@ -27,6 +27,7 @@ from fastmcp import FastMCP, Context
 from registry import SkillRegistry
 from executor import Executor
 from safety import SafetyViolation, check_execution, validate_manifest
+from evolution import ASREngine, ASR_ENABLED
 
 # ------------------------------------------------------------------ #
 #  Logging su stderr (non disturba il canale stdio MCP)               #
@@ -53,6 +54,18 @@ registry = SkillRegistry(skills_dir=SKILLS_DIR)
 executor = Executor()
 
 # ------------------------------------------------------------------ #
+#  ASR — Adaptive Skill Reinforcement                                 #
+# ------------------------------------------------------------------ #
+DATA_DIR = REPO_ROOT / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
+asr = ASREngine(
+    skills_dir=SKILLS_DIR,
+    data_dir=DATA_DIR,
+    registry=registry,
+)
+
+# ------------------------------------------------------------------ #
 #  MCP Server                                                          #
 # ------------------------------------------------------------------ #
 @asynccontextmanager
@@ -70,20 +83,18 @@ mcp = FastMCP(
     "skill-os",
     lifespan=_lifespan,
     instructions=(
-        "Sei connesso a skill-os v1.3 — MCP Skill Registry auto-evolutivo.\n\n"
+        "Sei connesso a skill-os v2.0 — MCP Skill Registry con ASR (Adaptive Skill Reinforcement).\n\n"
         "Workflow standard (3 chiamate):\n"
         "  1. list_skills()                    → scopri le skill disponibili\n"
         "  2. get_prompt('skill_id')           → carica il system prompt (lazy)\n"
         "  3. execute('skill_id:tool_id', ...) → esegui il tool in sandbox\n\n"
+        "ASR — Evoluzione adattiva:\n"
+        "  Se una skill fallisce, il sistema la evolve automaticamente:\n"
+        "  diagnosi → mutazione → retry → risultato corretto.\n"
+        "  Le skill convergono verso la perfezione attraverso l'uso reale.\n"
+        "  skill_fitness('skill_id')           → stato RL della skill\n\n"
         "Creare nuove skill:\n"
-        "  create_skill('skill_id', 'descrizione') → genera skill completa via LLM\n"
-        "  Se execute() non trova una skill, tenta di generarla automaticamente.\n\n"
-        "Modalità auto-approve (AUTO_APPROVE_SAFE=true):\n"
-        "  Le skill sicure (no side_effects, idempotent) vengono approvate\n"
-        "  automaticamente. Le skill con side_effects richiedono approve_pending().\n\n"
-        "Workflow autonomo (ORCHESTRATOR_ENABLED=true):\n"
-        "  L'orchestratore valuta le skill in background ogni 30 min.\n"
-        "  Con AUTO_APPROVE_SAFE=true, le proposte sicure si auto-applicano.\n\n"
+        "  create_skill('skill_id', 'descrizione') → genera skill completa via LLM\n\n"
         "Il ragionamento LLM usa MCP sampling → abbonamento Pro, zero API key.\n\n"
         "Formato tool_ref: 'skill_id:tool_id' (es. 'python_exec:run_code')"
     ),
@@ -150,6 +161,30 @@ async def execute(tool_ref: str, code: str = "", input_data: str = "",
     logger.info(f"[execute] {tool_ref} | code_len={len(code)}")
     result = await executor.run(skill_id, tool_id, tool, code, input_data)
     logger.info(f"[execute] {tool_ref} → {result['status']} (exit {result['exit_code']})")
+
+    # ── ASR: Adaptive Skill Reinforcement ─────────────────────────
+    if ASR_ENABLED:
+        reward = asr.compute_reward(result)
+        ih = asr.input_hash(code, input_data)
+        await asr.fitness.record_episode(
+            skill_id, tool_ref, reward,
+            result.get("stderr") if reward < 0 else None, ih,
+        )
+
+        if reward < 0:
+            logger.info(f"[ASR] reward={reward} per {tool_ref}, tentativo evoluzione...")
+            evolution_result = await asr.evolve(
+                skill_id=skill_id,
+                tool_id=tool_id,
+                tool=tool,
+                result=result,
+                code=code,
+                input_data=input_data,
+                executor=executor,
+                ctx=ctx,
+            )
+            _audit_log(tool_ref, f"asr:{evolution_result.get('asr_info', {}).get('evolved', False)}")
+            return evolution_result
 
     # ── LLM enrichment via MCP sampling ──────────────────────────
     if result["status"] == "ok" and ctx is not None:
@@ -480,6 +515,20 @@ def list_pending_approvals() -> list:
     return pending
 
 
+@mcp.tool()
+async def skill_fitness(skill_id: str = "") -> dict:
+    """
+    Ritorna lo stato RL (Adaptive Skill Reinforcement) di una o tutte le skill.
+    Mostra: fitness score, generazione, curva di apprendimento, status.
+
+    Args:
+        skill_id: ID della skill (vuoto = tutte le skill)
+    """
+    if skill_id:
+        return await asr.fitness.get_fitness(skill_id)
+    return await asr.fitness.get_all_fitness()
+
+
 # ------------------------------------------------------------------ #
 #  Audit log                                                           #
 # ------------------------------------------------------------------ #
@@ -713,6 +762,6 @@ def _auto_approve_pending_proposals():
 #  Run                                                                 #
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    logger.info("skill-os v1.3 — avvio (stdio, Claude Code transport)")
+    logger.info("skill-os v2.0 — avvio con ASR (stdio, Claude Code transport)")
     logger.info(f"skills_dir = {SKILLS_DIR}")
     mcp.run()
