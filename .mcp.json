@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "skill-os": {
+      "command": "docker",
+      "args": [
+        "compose",
+        "run",
+        "--rm",
+        "-T",
+        "skill-os"
+      ]
+    }
+  }
+}

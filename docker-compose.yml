@@ -1,0 +1,36 @@
+services:
+  skill-os:
+    build: .
+    image: skill-os:1.2
+    container_name: skill-os
+
+    volumes:
+      # Monta l'intero progetto: git, skills e log vivono sul tuo disco
+      # hot-reload e git commit funzionano senza restart
+      - .:/app
+
+      # Socket Docker: necessario per lanciare i container sandbox
+      # (commenta questa riga se vuoi usare SKILL_OS_SANDBOX=mock)
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    environment:
+      # "docker" = sandbox Docker reale (richiede socket montato)
+      # "mock"   = subprocess locale, nessun isolamento (solo dev)
+      SKILL_OS_SANDBOX: ${SKILL_OS_SANDBOX:-mock}
+
+      # "true" = orchestratore autonomo attivo (ogni 30 min)
+      # "false" = solo su richiesta manuale
+      ORCHESTRATOR_ENABLED: ${ORCHESTRATOR_ENABLED:-false}
+      ORCHESTRATOR_INTERVAL: ${ORCHESTRATOR_INTERVAL:-1800}
+
+      # NON serve ANTHROPIC_API_KEY: il ragionamento LLM passa
+      # attraverso MCP sampling → abbonamento Claude Pro
+
+      # Timeout attesa approvazione upsert (secondi)
+      APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}
+
+    # stdin_open + tty: necessari per il transport stdio MCP (Claude Code)
+    stdin_open: true
+    tty: false
+
+    restart: "no"   # Claude Code lancia/termina il container ad ogni sessione

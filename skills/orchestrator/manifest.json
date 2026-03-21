@@ -1,0 +1,25 @@
+{
+  "id": "orchestrator",
+  "version": "1.0.0",
+  "description": "Agente interno che monitora le skill, sceglie cosa migliorare e avvia il ciclo di evoluzione autonomamente.",
+  "system_prompt_uri": "skill://orchestrator/system_prompt.md",
+  "tools": [
+    {
+      "id": "run_cycle",
+      "description": "Esegue un ciclo completo di auto-evoluzione: analizza logs, sceglie skill target, lancia eval, propone upsert se necessario.",
+      "entrypoint": "tools/run_cycle.py:main",
+      "execution": {
+        "tier": "server",
+        "sandbox": "none",
+        "timeout_seconds": 120
+      },
+      "safety": {
+        "side_effects": true,
+        "requires_human_approval": false,
+        "idempotent": false,
+        "note": "Il ciclo propone upsert ma ogni upsert richiede approvazione separata."
+      },
+      "runtime": { "language": "python", "version": "3.11", "dependencies": [] }
+    }
+  ]
+}

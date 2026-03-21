@@ -1,0 +1,40 @@
+{
+  "id": "skill_manager",
+  "version": "1.0.0",
+  "description": "Valuta e aggiorna le skill del registry. Il cuore dell'auto-evoluzione.",
+  "system_prompt_uri": "skill://skill_manager/system_prompt.md",
+  "tools": [
+    {
+      "id": "eval_skill",
+      "description": "Valuta una skill con test cases. Ritorna score 0-10 + critique strutturata.",
+      "entrypoint": "tools/eval.py:main",
+      "execution": {
+        "tier": "server",
+        "sandbox": "none",
+        "timeout_seconds": 60
+      },
+      "safety": {
+        "side_effects": false,
+        "requires_human_approval": false,
+        "idempotent": true
+      },
+      "runtime": { "language": "python", "version": "3.11", "dependencies": [] }
+    },
+    {
+      "id": "upsert_skill",
+      "description": "Aggiorna manifest/prompt/tool di una skill. Richiede approvazione umana + auto-commit Git.",
+      "entrypoint": "tools/upsert.py:main",
+      "execution": {
+        "tier": "server",
+        "sandbox": "none",
+        "timeout_seconds": 360
+      },
+      "safety": {
+        "side_effects": true,
+        "requires_human_approval": true,
+        "idempotent": false
+      },
+      "runtime": { "language": "python", "version": "3.11", "dependencies": [] }
+    }
+  ]
+}

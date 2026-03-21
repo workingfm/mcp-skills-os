@@ -1,0 +1,29 @@
+{
+  "id": "python_exec",
+  "version": "1.0.0",
+  "description": "Esegue codice Python arbitrario in sandbox sicura. La skill madre: simula qualsiasi use case.",
+  "system_prompt_uri": "skill://python_exec/system_prompt.md",
+  "tools": [
+    {
+      "id": "run_code",
+      "description": "Esegue uno script Python in un container isolato e ritorna stdout/stderr.",
+      "entrypoint": "tools/run.py:main",
+      "execution": {
+        "tier": "server",
+        "sandbox": "docker",
+        "timeout_seconds": 30
+      },
+      "safety": {
+        "side_effects": false,
+        "requires_human_approval": false,
+        "idempotent": true,
+        "allowed_networks": []
+      },
+      "runtime": {
+        "language": "python",
+        "version": "3.11",
+        "dependencies": ["pandas", "numpy", "matplotlib", "rich"]
+      }
+    }
+  ]
+}
