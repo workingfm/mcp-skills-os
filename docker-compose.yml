@@ -1,7 +1,7 @@
 services:
   skill-os:
     build: .
-    image: skill-os:1.3
+    image: skill-os:2.0
     container_name: skill-os
 
     volumes:
@@ -32,6 +32,17 @@ services:
 
       # Timeout attesa approvazione upsert (secondi)
       APPROVAL_TIMEOUT_SECONDS: ${APPROVAL_TIMEOUT_SECONDS:-300}
+
+      # ASR — Adaptive Skill Reinforcement
+      ASR_ENABLED: ${ASR_ENABLED:-true}
+      ASR_MAX_RETRIES: ${ASR_MAX_RETRIES:-1}
+      ASR_MAX_MUTATIONS_PER_DAY: ${ASR_MAX_MUTATIONS_PER_DAY:-5}
+      ASR_STABILITY_THRESHOLD: ${ASR_STABILITY_THRESHOLD:-10}
+      ASR_DEGRADED_AFTER_ROLLBACKS: ${ASR_DEGRADED_AFTER_ROLLBACKS:-3}
+      ASR_FITNESS_ALPHA: ${ASR_FITNESS_ALPHA:-0.3}
+      ASR_MAX_EPISODES: ${ASR_MAX_EPISODES:-200}
+      ASR_MAX_SNAPSHOTS: ${ASR_MAX_SNAPSHOTS:-20}
+      ASR_COOLDOWN_SECONDS: ${ASR_COOLDOWN_SECONDS:-300}
 
     # stdin_open + tty: necessari per il transport stdio MCP (Claude Code)
     stdin_open: true

@@ -5,3 +5,4 @@ logs/
 pending_approvals/
 *.zip
 .DS_Store
+data/
