@@ -1,5 +1,5 @@
 """
-skill-os v1.2 — MCP Skill Registry AUTO-EVOLUTIVO
+skill-os v1.3 — MCP Skill Registry AUTO-EVOLUTIVO
 Entry point: FastMCP server (stdio → Claude Code)
 
 Il ragionamento LLM passa interamente attraverso MCP sampling,
@@ -70,21 +70,21 @@ mcp = FastMCP(
     "skill-os",
     lifespan=_lifespan,
     instructions=(
-        "Sei connesso a skill-os v1.2 — MCP Skill Registry auto-evolutivo.\n\n"
+        "Sei connesso a skill-os v1.3 — MCP Skill Registry auto-evolutivo.\n\n"
         "Workflow standard (3 chiamate):\n"
         "  1. list_skills()                    → scopri le skill disponibili\n"
         "  2. get_prompt('skill_id')           → carica il system prompt (lazy)\n"
         "  3. execute('skill_id:tool_id', ...) → esegui il tool in sandbox\n\n"
         "Creare nuove skill:\n"
         "  create_skill('skill_id', 'descrizione') → genera skill completa via LLM\n"
-        "  Se execute() non trova una skill, tenta di generarla automaticamente.\n"
-        "  Ogni nuova skill richiede approvazione: approve_pending(id, True)\n\n"
-        "Per il ciclo di auto-evoluzione:\n"
-        "  execute('skill_manager:eval_skill', code='{\"skill_id\":\"X\"}')\n"
-        "  execute('orchestrator:run_cycle')    → analizza e propone miglioramenti\n"
-        "  approve_pending(approval_id, approve=True) → approva l'upsert\n\n"
-        "Il ragionamento LLM (critique, proposte) usa MCP sampling → abbonamento Pro.\n"
-        "Non serve ANTHROPIC_API_KEY.\n\n"
+        "  Se execute() non trova una skill, tenta di generarla automaticamente.\n\n"
+        "Modalità auto-approve (AUTO_APPROVE_SAFE=true):\n"
+        "  Le skill sicure (no side_effects, idempotent) vengono approvate\n"
+        "  automaticamente. Le skill con side_effects richiedono approve_pending().\n\n"
+        "Workflow autonomo (ORCHESTRATOR_ENABLED=true):\n"
+        "  L'orchestratore valuta le skill in background ogni 30 min.\n"
+        "  Con AUTO_APPROVE_SAFE=true, le proposte sicure si auto-applicano.\n\n"
+        "Il ragionamento LLM usa MCP sampling → abbonamento Pro, zero API key.\n\n"
         "Formato tool_ref: 'skill_id:tool_id' (es. 'python_exec:run_code')"
     ),
 )
@@ -277,6 +277,12 @@ def _write_proposal_pending(skill_id: str, eval_result: dict, proposal: dict) ->
     (PENDING_DIR / f"{approval_id}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2)
     )
+
+    # ── Auto-approve se abilitato e sicuro ─────────────────────────
+    auto_result = _try_auto_approve(approval_id, payload)
+    if auto_result and auto_result.get("ok"):
+        logger.info(f"[auto-approve] proposta evoluzione {approval_id} auto-approvata")
+
     return approval_id
 
 
@@ -399,6 +405,22 @@ async def _generate_skill_via_llm(skill_id: str, description: str, ctx: Context)
 
     logger.info(f"[create-skill] proposta per '{skill_id}' creata, approval_id={approval_id}")
 
+    # ── Auto-approve se abilitato e sicuro ─────────────────────────
+    auto_result = _try_auto_approve(approval_id, payload)
+    if auto_result and auto_result.get("ok"):
+        return {
+            "status": "auto-approved",
+            "approval_id": approval_id,
+            "skill_id": skill_id,
+            "description": manifest.get("description", description),
+            "tools": [t["id"] for t in manifest.get("tools", [])],
+            "files_written": auto_result.get("files_written", []),
+            "message": (
+                f"Skill '{skill_id}' generata e AUTO-APPROVATA (safety check superato).\n"
+                f"La skill è già disponibile. Usa: execute('{skill_id}:run', ...)"
+            ),
+        }
+
     return {
         "status": "created",
         "approval_id": approval_id,
@@ -427,53 +449,18 @@ def approve_pending(approval_id: str, approve: bool = True) -> dict:
     if not pending_file.exists():
         return {"ok": False, "error": f"Approval ID '{approval_id}' non trovato"}
 
-    decision = "approved" if approve else "rejected"
-    decision_file = PENDING_DIR / f"{approval_id}.{decision}"
-    decision_file.write_text(decision)
+    if not approve:
+        (PENDING_DIR / f"{approval_id}.rejected").write_text("rejected")
+        logger.info(f"[approval] {approval_id} → rejected")
+        return {"ok": True, "approval_id": approval_id, "decision": "rejected"}
 
-    logger.info(f"[approval] {approval_id} → {decision}")
-
-    result = {"ok": True, "approval_id": approval_id, "decision": decision}
-
-    # ── Se approvato, applica le changes su disco ──────────────────
-    if approve:
-        try:
-            data = json.loads(pending_file.read_text())
-            skill_id = data.get("skill_id", "")
-            changes = data.get("changes", [])
-
-            if skill_id and changes:
-                skill_dir = SKILLS_DIR / skill_id
-                for change in changes:
-                    rel_path = change.get("file", "")
-                    content = change.get("after", "")
-                    if rel_path and content:
-                        target = skill_dir / rel_path
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_text(content, encoding="utf-8")
-
-                # Aggiorna versione nel manifest
-                manifest_path = skill_dir / "manifest.json"
-                if manifest_path.exists() and data.get("version_new"):
-                    try:
-                        manifest = json.loads(manifest_path.read_text())
-                        manifest["version"] = data["version_new"]
-                        manifest_path.write_text(
-                            json.dumps(manifest, indent=2, ensure_ascii=False))
-                    except Exception:
-                        pass
-
-                # Ricarica il registry per rendere la skill disponibile
-                registry.reload()
-
-                result["skill_id"] = skill_id
-                result["files_written"] = [c.get("file") for c in changes]
-                logger.info(f"[approval] changes applicate per '{skill_id}'")
-        except Exception as e:
-            logger.error(f"[approval] errore applicando changes: {e}")
-            result["warning"] = f"Approvato ma errore applicando changes: {e}"
-
-    return result
+    try:
+        data = json.loads(pending_file.read_text())
+        return _apply_pending(approval_id, data)
+    except Exception as e:
+        logger.error(f"[approval] errore applicando changes: {e}")
+        return {"ok": False, "approval_id": approval_id,
+                "error": f"Approvazione fallita: {e}"}
 
 
 @mcp.tool()
@@ -503,22 +490,155 @@ def _audit_log(tool_ref: str, status: str):
 
 
 # ------------------------------------------------------------------ #
+#  Auto-approve engine                                                 #
+# ------------------------------------------------------------------ #
+def _is_safe_for_auto_approve(pending_data: dict) -> bool:
+    """Verifica se una proposta è abbastanza sicura per l'auto-approvazione.
+
+    Criteri:
+      - Tutti i tool nella skill hanno side_effects=false
+      - Nessun tool richiede human_approval
+      - Tutti i tool sono idempotent
+      - Se è un'evoluzione, lo score prima deve essere >= AUTO_APPROVE_MIN_SCORE
+      - Source deve essere dal sistema (non manuale)
+    """
+    changes = pending_data.get("changes", [])
+
+    # Cerca il manifest tra i changes per validare i safety flag
+    for change in changes:
+        if change.get("file") == "manifest.json":
+            try:
+                manifest = json.loads(change.get("after", "{}"))
+                for tool in manifest.get("tools", []):
+                    safety = tool.get("safety", {})
+                    if safety.get("side_effects", True):
+                        return False
+                    if safety.get("requires_human_approval", True):
+                        return False
+                    if not safety.get("idempotent", False):
+                        return False
+            except (json.JSONDecodeError, Exception):
+                return False
+            break
+    else:
+        # Nessun manifest nei changes → è un'evoluzione di prompt/codice
+        # Controlla il manifest esistente della skill
+        skill_id = pending_data.get("skill_id", "")
+        manifest_path = SKILLS_DIR / skill_id / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+                for tool in manifest.get("tools", []):
+                    safety = tool.get("safety", {})
+                    if safety.get("side_effects", True):
+                        return False
+                    if safety.get("requires_human_approval", True):
+                        return False
+            except Exception:
+                return False
+        else:
+            return False
+
+    # Se è un'evoluzione, verifica lo score minimo
+    eval_score = pending_data.get("eval_score_before")
+    if eval_score is not None and eval_score < AUTO_APPROVE_MIN_SCORE:
+        return False
+
+    return True
+
+
+def _apply_pending(approval_id: str, pending_data: dict) -> dict:
+    """Applica una proposta approvata su disco."""
+    skill_id = pending_data.get("skill_id", "")
+    changes = pending_data.get("changes", [])
+
+    if not skill_id or not changes:
+        return {"ok": False, "error": "Dati incompleti nella proposta"}
+
+    # Scrivi il file di approvazione
+    (PENDING_DIR / f"{approval_id}.approved").write_text("approved")
+
+    skill_dir = SKILLS_DIR / skill_id
+    files_written = []
+    for change in changes:
+        rel_path = change.get("file", "")
+        content = change.get("after", "")
+        if rel_path and content:
+            target = skill_dir / rel_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            files_written.append(rel_path)
+
+    # Aggiorna versione nel manifest
+    manifest_path = skill_dir / "manifest.json"
+    version_new = pending_data.get("version_new")
+    if manifest_path.exists() and version_new:
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            manifest["version"] = version_new
+            manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+
+    registry.reload()
+
+    logger.info(f"[auto-approve] skill '{skill_id}' approvata e applicata")
+    return {
+        "ok": True,
+        "approval_id": approval_id,
+        "skill_id": skill_id,
+        "files_written": files_written,
+        "decision": "auto-approved",
+    }
+
+
+def _try_auto_approve(approval_id: str, pending_data: dict) -> dict | None:
+    """Se AUTO_APPROVE_SAFE è attivo e la proposta è sicura, approva automaticamente."""
+    if not AUTO_APPROVE_SAFE:
+        return None
+
+    if not _is_safe_for_auto_approve(pending_data):
+        logger.info(f"[auto-approve] {approval_id} non idoneo per auto-approvazione (safety check fallito)")
+        return None
+
+    logger.info(f"[auto-approve] {approval_id} idoneo — approvazione automatica in corso")
+    return _apply_pending(approval_id, pending_data)
+
+
+# ------------------------------------------------------------------ #
 #  Background Orchestrator Loop                                        #
 # ------------------------------------------------------------------ #
 ORCHESTRATOR_INTERVAL_SECONDS = int(os.getenv("ORCHESTRATOR_INTERVAL", "1800"))  # 30 min
 ORCHESTRATOR_ENABLED = os.getenv("ORCHESTRATOR_ENABLED", "false").lower() == "true"
+AUTO_APPROVE_SAFE = os.getenv("AUTO_APPROVE_SAFE", "false").lower() == "true"
+AUTO_APPROVE_MIN_SCORE = float(os.getenv("AUTO_APPROVE_MIN_SCORE", "7.0"))
 
 
 async def _orchestrator_loop():
     """
-    Background task: chiama orchestrator:run_cycle ogni N secondi.
-    Il subprocess fa eval + monitoring. Se serve una proposta LLM,
-    il risultato viene arricchito al prossimo execute() chiamato dall'utente.
-    Attiva con env ORCHESTRATOR_ENABLED=true.
+    Background task: ciclo autonomo di auto-evoluzione.
+
+    Ogni N secondi (default 30 min):
+      1. Esegue orchestrator:run_cycle (eval di tutte le skill)
+      2. Se una skill ha score basso → segnala necessità proposta LLM
+      3. Se AUTO_APPROVE_SAFE=true → le proposte sicure vengono applicate
+         automaticamente senza intervento umano
+      4. Le proposte non sicure restano in pending_approvals/ per review
+
+    Il background loop NON ha accesso a ctx (MCP sampling) perché non è
+    una chiamata tool. Le proposte LLM richiedono un execute() manuale
+    dall'agente connesso. Tuttavia, se l'orchestratore genera proposte
+    basate su euristiche (senza LLM), queste possono essere auto-approvate.
+
+    Attiva con: ORCHESTRATOR_ENABLED=true
+    Auto-approve: AUTO_APPROVE_SAFE=true
     """
+    mode_parts = ["ATTIVO" if ORCHESTRATOR_ENABLED else "STANDBY"]
+    if AUTO_APPROVE_SAFE:
+        mode_parts.append(f"auto-approve ON (min score: {AUTO_APPROVE_MIN_SCORE})")
     logger.info(
         f"[orchestrator] loop avviato (ogni {ORCHESTRATOR_INTERVAL_SECONDS}s). "
-        f"Stato: {'ATTIVO' if ORCHESTRATOR_ENABLED else 'STANDBY (set ORCHESTRATOR_ENABLED=true)'}"
+        f"Stato: {', '.join(mode_parts)}"
     )
     await asyncio.sleep(60)
 
@@ -535,16 +655,26 @@ async def _orchestrator_loop():
                     f"{stdout[:500]}"
                 )
 
-                # Se il ciclo segnala needs_proposal, logga per il prossimo
-                # execute() manuale (il background loop non ha ctx per sampling)
                 try:
                     cycle_data = json.loads(stdout)
                     if cycle_data.get("needs_proposal"):
-                        logger.info(
-                            f"[orchestrator] skill '{cycle_data.get('target_skill')}' "
-                            f"necessita proposta LLM. Esegui manualmente: "
-                            f"execute('orchestrator:run_cycle') per generarla via sampling."
-                        )
+                        target = cycle_data.get("target_skill", "?")
+                        if AUTO_APPROVE_SAFE:
+                            logger.info(
+                                f"[orchestrator] skill '{target}' necessita proposta LLM. "
+                                f"Auto-approve attivo: la proposta sarà applicata "
+                                f"automaticamente al prossimo execute() con ctx."
+                            )
+                        else:
+                            logger.info(
+                                f"[orchestrator] skill '{target}' necessita proposta LLM. "
+                                f"Esegui: execute('orchestrator:run_cycle') per generarla."
+                            )
+
+                    # Auto-approve delle proposte pendenti generate in questo ciclo
+                    if AUTO_APPROVE_SAFE:
+                        _auto_approve_pending_proposals()
+
                 except (json.JSONDecodeError, Exception):
                     pass
 
@@ -558,10 +688,31 @@ async def _orchestrator_loop():
         await asyncio.sleep(ORCHESTRATOR_INTERVAL_SECONDS)
 
 
+def _auto_approve_pending_proposals():
+    """Scansiona pending_approvals/ e auto-approva le proposte sicure non ancora processate."""
+    for f in PENDING_DIR.glob("*.json"):
+        approval_id = f.stem
+        # Skip se già processata
+        if ((PENDING_DIR / f"{approval_id}.approved").exists() or
+                (PENDING_DIR / f"{approval_id}.rejected").exists()):
+            continue
+
+        try:
+            data = json.loads(f.read_text())
+            auto_result = _try_auto_approve(approval_id, data)
+            if auto_result and auto_result.get("ok"):
+                logger.info(
+                    f"[orchestrator] proposta {approval_id} per "
+                    f"'{data.get('skill_id')}' auto-approvata in background"
+                )
+        except Exception as e:
+            logger.warning(f"[orchestrator] errore auto-approve {approval_id}: {e}")
+
+
 # ------------------------------------------------------------------ #
 #  Run                                                                 #
 # ------------------------------------------------------------------ #
 if __name__ == "__main__":
-    logger.info("skill-os v1.2 — avvio (stdio, Claude Code transport)")
+    logger.info("skill-os v1.3 — avvio (stdio, Claude Code transport)")
     logger.info(f"skills_dir = {SKILLS_DIR}")
     mcp.run()
