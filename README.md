@@ -4,7 +4,7 @@
 
 Un server MCP (Model Context Protocol) con un sistema di **Reinforcement Learning applicato all'evoluzione di tool AI**. Le skill si evolvono automaticamente quando falliscono, convergendo verso la perfezione attraverso l'uso reale. Zero API key necessarie — il ragionamento LLM passa attraverso MCP sampling con l'abbonamento Claude Pro.
 
-https://github.com/workingfm/mcp-skills-os/raw/main/assets/skill-os-explainer.mp4
+![skill-os v2.0 — Come funziona](assets/skill-os-explainer.gif)
 
 ---
 
